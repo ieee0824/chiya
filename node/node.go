@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/ieee0824/web-bench/util"
+	"github.com/ieee0824/chiya/util"
 )
 
 type addPacket struct {
