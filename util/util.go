@@ -3,8 +3,9 @@ package util
 import (
 	"errors"
 	"fmt"
-	"log"
+	"io/ioutil"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -21,11 +22,32 @@ func (n Node) String() string {
 	return fmt.Sprintf("%s://%s:%s", *n.Protocol, *n.Host, *n.Port)
 }
 
+var client = &http.Client{}
+
 type Bench struct {
 	Target     *string  `json:"target"`
 	Rate       *float64 `json:"rate"`
 	TimeOut    *int64   `json:"timeout"`
 	TimeLength *int64   `json:"time_length"`
+}
+
+func fetchURL(wg *sync.WaitGroup, q chan string, r chan bool) {
+	// 注意点: ↑これポインタな。
+	defer wg.Done()
+	for {
+		url, ok := <-q // closeされると ok が false になる
+		if !ok {
+			return
+		}
+		resp, err := client.Get(url)
+		if err != nil {
+			r <- false
+		} else {
+			ioutil.ReadAll(resp.Body)
+			r <- true
+		}
+
+	}
 }
 
 func (b *Bench) Do() (*Result, error) {
@@ -44,27 +66,43 @@ func (b *Bench) Do() (*Result, error) {
 		t := int64(10)
 		b.TimeLength = &t
 	}
-	var client = &http.Client{
-		Timeout: time.Duration(*b.TimeOut) * time.Millisecond,
-	}
+	client.Timeout = time.Duration(*b.TimeOut) * time.Millisecond
+
 	result := &Result{}
 
 	timeout := time.After(time.Duration(*b.TimeLength) * time.Second)
 	r := 1 / *b.Rate * float64(time.Second)
 	tick := time.Tick(time.Duration(int64(r)))
 
+	var wg sync.WaitGroup
+
+	q := make(chan string, 16)
+	resultQueue := make(chan bool, 255)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go fetchURL(&wg, q, resultQueue)
+	}
+
+	go func() {
+		for {
+			if b := <-resultQueue; !b {
+				result.FailCount++
+			}
+			result.RequestCount++
+		}
+	}()
+
 	for {
 		select {
 		case <-timeout:
+			close(q)
 			return result, nil
 		case <-tick:
-			_, err := client.Get(*b.Target)
-			if err != nil {
-				log.Println(err)
-				result.FailCount++
-			} else {
-				result.RequestCount++
+			if len(q) == 16 {
+				continue
 			}
+			q <- *b.Target
+		default:
 		}
 	}
 }
