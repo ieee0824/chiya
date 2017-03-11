@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -12,6 +13,51 @@ import (
 
 	"github.com/ieee0824/chiya/util"
 )
+
+var (
+	PORT             *string
+	CLUSTER_ADDRESS  *string
+	CLUSTER_PORT     *string
+	CLUSTER_PROTOCOL *string
+	OWN_HOST         *string
+)
+
+func init() {
+	log.SetFlags(log.Llongfile)
+	OWN_HOST = flag.String("o", "localhost", "own ip")
+	PORT = flag.String("p", "8080", "bench marker port")
+	CLUSTER_ADDRESS = flag.String("c_address", "", "cluster address")
+	CLUSTER_PORT = flag.String("c_port", "", "cluster port")
+	CLUSTER_PROTOCOL = flag.String("c_prot", "http", "cluster protocol")
+	flag.Parse()
+}
+
+func initialize() {
+	own.Host = OWN_HOST
+	own.Port = PORT
+	own.Protocol = CLUSTER_PROTOCOL
+	if CLUSTER_ADDRESS == nil {
+		CLUSTER_ADDRESS = nil
+		CLUSTER_PORT = nil
+		return
+	}
+	if *CLUSTER_ADDRESS == "" {
+		CLUSTER_ADDRESS = nil
+		CLUSTER_PORT = nil
+		return
+	}
+	node := &util.Node{
+		CLUSTER_ADDRESS,
+		CLUSTER_PORT,
+		CLUSTER_PROTOCOL,
+	}
+	a := NewAddPacket()
+	a.Node = own
+	nodeTable[node.String()] = node
+	if err := add(a); err != nil {
+		log.Fatalln(err)
+	}
+}
 
 type addPacket struct {
 	TTL  *int       `json:"ttl"`
@@ -26,7 +72,9 @@ func NewAddPacket() *addPacket {
 	return r
 }
 
-var client = &http.Client{}
+var client = &http.Client{
+	Timeout: 10 * time.Second,
+}
 var own = &util.Node{}
 
 var nodeTable = map[string]*util.Node{}
@@ -36,12 +84,15 @@ func add(a *addPacket) error {
 	if a == nil {
 		return errors.New("add info is nil")
 	}
+	log.Println("run add func")
 	packet, err := json.Marshal(a)
 	if err != nil {
 		return err
 	}
+	log.Println(nodeTable)
 	for k, v := range nodeTable {
 		if k != a.Node.String() {
+			log.Println(v.String() + "/add")
 			req, err := http.NewRequest("POST", v.String()+"/add", bytes.NewReader(packet))
 			if err != nil {
 				return err
@@ -56,6 +107,7 @@ func add(a *addPacket) error {
 }
 
 func check(n *util.Node) error {
+	log.Println("run check")
 	if n == nil {
 		return errors.New("node is nil")
 	}
@@ -72,6 +124,7 @@ func check(n *util.Node) error {
 		if err == nil {
 			return nil
 		}
+		log.Println("wait 1 sec")
 		time.Sleep(1 * time.Second)
 	}
 
@@ -98,26 +151,33 @@ func addHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 	addPacket := &addPacket{}
+	if err := json.Unmarshal(bin, addPacket); err != nil {
+		internalError(w, err)
+		return
+	}
 	node := addPacket.Node
-	nodeTable[node.String()] = node
+	if node != nil {
+		nodeTable[node.String()] = node
+	}
 
 	if err := check(node); err != nil {
 		internalError(w, err)
 		return
 	}
 
-	if err := json.Unmarshal(bin, addPacket); err != nil {
-		internalError(w, err)
+	addPacket.TTL = pInt(*addPacket.TTL - 1)
+	if *addPacket.TTL == 0 {
 		return
 	}
-	addPacket.TTL = pInt(*addPacket.TTL - 1)
 	if err := add(addPacket); err != nil {
+		log.Println(err)
 		internalError(w, err)
 		return
 	}
 }
 
 func checkHandler(w http.ResponseWriter, r *http.Request) {
+	log.Println("check handler")
 	bin, err := ioutil.ReadAll(r.Body)
 	if err != nil {
 		internalError(w, err)
@@ -167,16 +227,20 @@ func benchHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	rbin, _ := json.Marshal(result)
-	w.Write(rbin)
+	w.Write([]byte(result.String()))
 }
 
 func main() {
-	log.SetFlags(log.Llongfile)
+	fin := make(chan bool)
+	go func() {
+		initialize()
+		fin <- true
+	}()
 	http.HandleFunc("/", rootHandler)
 	http.HandleFunc("/add", addHandler)
 	http.HandleFunc("/check", checkHandler)
 	http.HandleFunc("/list", listHandler)
 	http.HandleFunc("/bench", benchHandler)
-	http.ListenAndServe(":8080", nil)
+	http.ListenAndServe(":"+*PORT, nil)
+	<-fin
 }
