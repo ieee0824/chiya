@@ -1,6 +1,7 @@
 package util
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -31,8 +32,17 @@ type Bench struct {
 	TimeLength *int64   `json:"time_length"`
 }
 
+// 2xx か 3xxじゃないときture
+func checkFail(code int) bool {
+	if code/100 == 2 {
+		return false
+	} else if code/100 == 3 {
+		return false
+	}
+	return true
+}
+
 func fetchURL(wg *sync.WaitGroup, q chan string, r chan bool) {
-	// 注意点: ↑これポインタな。
 	defer wg.Done()
 	for {
 		url, ok := <-q // closeされると ok が false になる
@@ -40,7 +50,7 @@ func fetchURL(wg *sync.WaitGroup, q chan string, r chan bool) {
 			return
 		}
 		resp, err := client.Get(url)
-		if err != nil {
+		if err != nil || checkFail(resp.StatusCode) {
 			r <- false
 		} else {
 			ioutil.ReadAll(resp.Body)
@@ -76,12 +86,14 @@ func (b *Bench) Do() (*Result, error) {
 
 	var wg sync.WaitGroup
 
-	q := make(chan string, 16)
+	q := make(chan string, 64)
 	resultQueue := make(chan bool, 255)
-	for i := 0; i < 8; i++ {
+	for i := 0; i < 32; i++ {
 		wg.Add(1)
 		go fetchURL(&wg, q, resultQueue)
 	}
+
+	start := time.Now()
 
 	go func() {
 		for {
@@ -95,7 +107,9 @@ func (b *Bench) Do() (*Result, error) {
 	for {
 		select {
 		case <-timeout:
+			end := time.Now()
 			close(q)
+			result.ProcessingTime = end.Sub(start)
 			return result, nil
 		case <-tick:
 			if len(q) == 16 {
@@ -108,6 +122,22 @@ func (b *Bench) Do() (*Result, error) {
 }
 
 type Result struct {
-	RequestCount int `json:"request_count"`
-	FailCount    int `json:"fail_count"`
+	Status         *bool         `json:"status"`
+	RequestCount   int           `json:"request_count"`
+	FailCount      int           `json:"fail_count"`
+	ProcessingTime time.Duration `json:"processing_time"`
+}
+
+func (r Result) String() string {
+	ret := struct {
+		RequestCount   int    `json:"request_count"`
+		FailCount      int    `json:"fail_count"`
+		ProcessingTime string `json:"processing_time"`
+	}{
+		r.RequestCount,
+		r.FailCount,
+		fmt.Sprint(r.ProcessingTime.Seconds()),
+	}
+	bin, _ := json.Marshal(ret)
+	return string(bin)
 }
