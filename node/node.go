@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/ieee0824/chiya/util"
@@ -21,6 +21,7 @@ var (
 	CLUSTER_PROTOCOL *string
 	OWN_HOST         *string
 )
+var own = &util.Node{}
 
 func init() {
 	log.SetFlags(log.Llongfile)
@@ -75,7 +76,6 @@ func NewAddPacket() *addPacket {
 var client = &http.Client{
 	Timeout: 10 * time.Second,
 }
-var own = &util.Node{}
 
 var nodeTable = map[string]*util.Node{}
 
@@ -143,6 +143,7 @@ func pInt(i int) *int {
 }
 
 func addHandler(w http.ResponseWriter, r *http.Request) {
+	log.Println("add handle")
 	// addPacketを受け取ったらTTLを減らす
 	bin, err := ioutil.ReadAll(r.Body)
 	if err != nil {
@@ -204,8 +205,116 @@ func rootHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("It works"))
 }
 
-func benchHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("start bench")
+func transferBench(rule *util.Bench) []util.Result {
+	var wg sync.WaitGroup
+	ping()
+	ret := []util.Result{}
+	if rule == nil {
+		return nil
+	}
+	q := make(chan util.Node, len(nodeTable)*2)
+	resultQ := make(chan util.Result, len(nodeTable)*2)
+	requestBody, _ := json.Marshal(rule)
+
+	for i := 0; i < len(nodeTable)+1; i++ {
+		wg.Add(1)
+		go func(wg *sync.WaitGroup, q chan util.Node, r chan util.Result) {
+			defer wg.Done()
+			for {
+				node, ok := <-q
+				if !ok {
+					return
+				}
+				req, err := http.NewRequest("PORT", node.String()+"/api/bench", bytes.NewReader(requestBody))
+				if err != nil {
+					log.Println(err)
+					var status = false
+					resultQ <- util.Result{Status: &status}
+				}
+				resp, err := client.Do(req)
+				if err != nil {
+					log.Println(err)
+					var status = false
+					resultQ <- util.Result{Status: &status}
+				}
+				defer resp.Body.Close()
+				respBody, err := ioutil.ReadAll(resp.Body)
+				if err != nil {
+					log.Println(err)
+					var status = false
+					resultQ <- util.Result{Status: &status}
+				}
+				result := &util.Result{}
+				if err := json.Unmarshal(respBody, result); err != nil {
+					log.Println(string(respBody))
+					log.Println(err)
+					var status = false
+					resultQ <- util.Result{Status: &status}
+				}
+				var status = true
+				result.Status = &status
+				resultQ <- *result
+			}
+		}(&wg, q, resultQ)
+	}
+
+	for _, v := range nodeTable {
+		q <- *v
+	}
+	q <- *own
+	close(q)
+
+	for {
+		ret = append(ret, <-resultQ)
+		if len(ret) >= len(nodeTable)+1 {
+			return ret
+		}
+	}
+
+}
+
+var pingClient = http.Client{
+	Timeout: 10 * time.Second,
+}
+
+func pingWorker(wg *sync.WaitGroup, q chan util.Node) {
+	defer wg.Done()
+	for {
+		node, ok := <-q
+		if !ok {
+			return
+		}
+		_, err := pingClient.Get(node.String())
+		if err != nil {
+			log.Println(node.String() + " is delete")
+			delete(nodeTable, node.String())
+		}
+	}
+}
+
+// 動いてるノードを調べる
+// 反応がない場合nodeを削除する
+func ping() {
+	var wg sync.WaitGroup
+	q := make(chan util.Node, 16)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go pingWorker(&wg, q)
+	}
+	for _, v := range nodeTable {
+		q <- *v
+	}
+	close(q)
+	wg.Wait()
+}
+
+func pingHandler(w http.ResponseWriter, r *http.Request) {
+	bin, _ := json.Marshal(true)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(bin)
+}
+
+func clusterBenchHandler(w http.ResponseWriter, r *http.Request) {
 	bin, err := ioutil.ReadAll(r.Body)
 	if err != nil {
 		log.Println(err)
@@ -220,6 +329,55 @@ func benchHandler(w http.ResponseWriter, r *http.Request) {
 		internalError(w, err)
 		return
 	}
+	results := transferBench(bench)
+	w.Header().Set("Content-Type", "application/json")
+	respBody, _ := json.Marshal(results)
+	w.Write(respBody)
+}
+
+func benchAPI(w http.ResponseWriter, r *http.Request) {
+	bin, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		log.Println(err)
+		internalError(w, err)
+		return
+	}
+	defer r.Body.Close()
+	var bench = &util.Bench{}
+	if err := json.Unmarshal(bin, bench); err != nil {
+		log.Println("\n" + string(bin))
+		log.Println(err)
+		internalError(w, err)
+		return
+	}
+
+	result, err := bench.Do()
+	if err != nil {
+		log.Println(err)
+		internalError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	respBody, _ := json.Marshal(result)
+	w.Write(respBody)
+}
+
+func benchHandler(w http.ResponseWriter, r *http.Request) {
+	bin, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		log.Println(err)
+		internalError(w, err)
+		return
+	}
+	defer r.Body.Close()
+	var bench = &util.Bench{}
+	if err := json.Unmarshal(bin, bench); err != nil {
+		log.Println("\n" + string(bin))
+		log.Println(err)
+		internalError(w, err)
+		return
+	}
+
 	result, err := bench.Do()
 	if err != nil {
 		log.Println(err)
@@ -236,11 +394,15 @@ func main() {
 		initialize()
 		fin <- true
 	}()
+	client.Timeout = 1 * time.Hour
 	http.HandleFunc("/", rootHandler)
 	http.HandleFunc("/add", addHandler)
 	http.HandleFunc("/check", checkHandler)
 	http.HandleFunc("/list", listHandler)
 	http.HandleFunc("/bench", benchHandler)
+	http.HandleFunc("/api/bench", benchAPI)
+	http.HandleFunc("/ping", pingHandler)
+	http.HandleFunc("/cluster", clusterBenchHandler)
 	http.ListenAndServe(":"+*PORT, nil)
 	<-fin
 }

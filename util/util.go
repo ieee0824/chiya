@@ -122,6 +122,7 @@ func (b *Bench) Do() (*Result, error) {
 }
 
 type Result struct {
+	Status         *bool         `json:"status"`
 	RequestCount   int           `json:"request_count"`
 	FailCount      int           `json:"fail_count"`
 	ProcessingTime time.Duration `json:"processing_time"`
