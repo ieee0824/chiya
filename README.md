@@ -14,7 +14,7 @@ $ chiya -p 8080 -c_address ${other_node_ip} -c_port ${other_node_port} -o ${own_
 
 ## run bench
 ```
-$ curl  -X POST -d '{"target": "http://localhost:8080","rate": 1000,"timeout": 10000,"time_length": 60}' http://${node_ip}
+$ curl  -X POST -d '{"target": "target url","rate": request rate,"timeout": time out sec,"time_length": 60}' http://${node_ip}
 ```
 
 ## options
