@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"runtime"
 	"sync"
 	"time"
 
@@ -56,7 +57,6 @@ func initialize() {
 	a.Node = own
 	nodeTable[node.String()] = node
 	if err := add(a); err != nil {
-		log.Fatalln(err)
 	}
 }
 
@@ -74,7 +74,7 @@ func NewAddPacket() *addPacket {
 }
 
 var client = &http.Client{
-	Timeout: 10 * time.Second,
+	Timeout: 300 * time.Second,
 }
 
 var nodeTable = map[string]*util.Node{}
@@ -84,15 +84,12 @@ func add(a *addPacket) error {
 	if a == nil {
 		return errors.New("add info is nil")
 	}
-	log.Println("run add func")
 	packet, err := json.Marshal(a)
 	if err != nil {
 		return err
 	}
-	log.Println(nodeTable)
 	for k, v := range nodeTable {
 		if k != a.Node.String() {
-			log.Println(v.String() + "/add")
 			req, err := http.NewRequest("POST", v.String()+"/add", bytes.NewReader(packet))
 			if err != nil {
 				return err
@@ -107,7 +104,6 @@ func add(a *addPacket) error {
 }
 
 func check(n *util.Node) error {
-	log.Println("run check")
 	if n == nil {
 		return errors.New("node is nil")
 	}
@@ -124,7 +120,6 @@ func check(n *util.Node) error {
 		if err == nil {
 			return nil
 		}
-		log.Println("wait 1 sec")
 		time.Sleep(1 * time.Second)
 	}
 
@@ -143,7 +138,6 @@ func pInt(i int) *int {
 }
 
 func addHandler(w http.ResponseWriter, r *http.Request) {
-	log.Println("add handle")
 	// addPacketを受け取ったらTTLを減らす
 	bin, err := ioutil.ReadAll(r.Body)
 	if err != nil {
@@ -171,14 +165,12 @@ func addHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := add(addPacket); err != nil {
-		log.Println(err)
 		internalError(w, err)
 		return
 	}
 }
 
 func checkHandler(w http.ResponseWriter, r *http.Request) {
-	log.Println("check handler")
 	bin, err := ioutil.ReadAll(r.Body)
 	if err != nil {
 		internalError(w, err)
@@ -214,9 +206,15 @@ func transferBench(rule *util.Bench) []util.Result {
 	}
 	q := make(chan util.Node, len(nodeTable)*2)
 	resultQ := make(chan util.Result, len(nodeTable)*2)
-	requestBody, _ := json.Marshal(rule)
+	workerNum := len(nodeTable) + 1
+	rate := *rule.Rate
+	rate = rate / float64(workerNum)
+	rule.Rate = &rate
 
-	for i := 0; i < len(nodeTable)+1; i++ {
+	requestBody, _ := json.Marshal(rule)
+	done := make(chan struct{})
+
+	for i := 0; i < workerNum; i++ {
 		wg.Add(1)
 		go func(wg *sync.WaitGroup, q chan util.Node, r chan util.Result) {
 			defer wg.Done()
@@ -227,29 +225,29 @@ func transferBench(rule *util.Bench) []util.Result {
 				}
 				req, err := http.NewRequest("PORT", node.String()+"/api/bench", bytes.NewReader(requestBody))
 				if err != nil {
-					log.Println(err)
 					var status = false
 					resultQ <- util.Result{Status: &status}
+					return
 				}
+				req.Cancel = done
 				resp, err := client.Do(req)
 				if err != nil {
-					log.Println(err)
 					var status = false
 					resultQ <- util.Result{Status: &status}
+					return
 				}
 				defer resp.Body.Close()
 				respBody, err := ioutil.ReadAll(resp.Body)
 				if err != nil {
-					log.Println(err)
 					var status = false
 					resultQ <- util.Result{Status: &status}
+					return
 				}
 				result := &util.Result{}
 				if err := json.Unmarshal(respBody, result); err != nil {
-					log.Println(string(respBody))
-					log.Println(err)
 					var status = false
 					resultQ <- util.Result{Status: &status}
+					return
 				}
 				var status = true
 				result.Status = &status
@@ -267,6 +265,7 @@ func transferBench(rule *util.Bench) []util.Result {
 	for {
 		ret = append(ret, <-resultQ)
 		if len(ret) >= len(nodeTable)+1 {
+			close(done)
 			return ret
 		}
 	}
@@ -286,7 +285,6 @@ func pingWorker(wg *sync.WaitGroup, q chan util.Node) {
 		}
 		_, err := pingClient.Get(node.String())
 		if err != nil {
-			log.Println(node.String() + " is delete")
 			delete(nodeTable, node.String())
 		}
 	}
@@ -314,46 +312,51 @@ func pingHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(bin)
 }
 
+func calc(results []util.Result) util.Result {
+	fail := 0
+	requests := 0
+	for _, r := range results {
+		fail += r.FailCount
+		requests += r.RequestCount
+	}
+	results[0].FailCount = fail
+	results[0].RequestCount = requests
+	return results[0]
+}
+
 func clusterBenchHandler(w http.ResponseWriter, r *http.Request) {
 	bin, err := ioutil.ReadAll(r.Body)
 	if err != nil {
-		log.Println(err)
 		internalError(w, err)
 		return
 	}
 	defer r.Body.Close()
 	var bench = &util.Bench{}
 	if err := json.Unmarshal(bin, bench); err != nil {
-		log.Println("\n" + string(bin))
-		log.Println(err)
 		internalError(w, err)
 		return
 	}
 	results := transferBench(bench)
 	w.Header().Set("Content-Type", "application/json")
-	respBody, _ := json.Marshal(results)
+	respBody, _ := json.Marshal(calc(results))
 	w.Write(respBody)
 }
 
 func benchAPI(w http.ResponseWriter, r *http.Request) {
 	bin, err := ioutil.ReadAll(r.Body)
 	if err != nil {
-		log.Println(err)
 		internalError(w, err)
 		return
 	}
 	defer r.Body.Close()
 	var bench = &util.Bench{}
 	if err := json.Unmarshal(bin, bench); err != nil {
-		log.Println("\n" + string(bin))
-		log.Println(err)
 		internalError(w, err)
 		return
 	}
 
 	result, err := bench.Do()
 	if err != nil {
-		log.Println(err)
 		internalError(w, err)
 		return
 	}
@@ -365,22 +368,18 @@ func benchAPI(w http.ResponseWriter, r *http.Request) {
 func benchHandler(w http.ResponseWriter, r *http.Request) {
 	bin, err := ioutil.ReadAll(r.Body)
 	if err != nil {
-		log.Println(err)
 		internalError(w, err)
 		return
 	}
 	defer r.Body.Close()
 	var bench = &util.Bench{}
 	if err := json.Unmarshal(bin, bench); err != nil {
-		log.Println("\n" + string(bin))
-		log.Println(err)
 		internalError(w, err)
 		return
 	}
 
 	result, err := bench.Do()
 	if err != nil {
-		log.Println(err)
 		internalError(w, err)
 		return
 	}
@@ -389,12 +388,13 @@ func benchHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	runtime.GOMAXPROCS(runtime.NumCPU())
 	fin := make(chan bool)
 	go func() {
 		initialize()
 		fin <- true
 	}()
-	client.Timeout = 1 * time.Hour
+	client.Timeout = 300 * time.Second
 	http.HandleFunc("/", rootHandler)
 	http.HandleFunc("/add", addHandler)
 	http.HandleFunc("/check", checkHandler)
