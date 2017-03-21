@@ -1,0 +1,16 @@
+version: 2
+jobs:
+    build:
+        working_directory: /go/src/github.com/ieee0824/chiya
+        docker:
+            - image: golang:latest
+              environment:
+                  GO15VENDOREXPERIMENT: 1
+        steps:
+            - checkout
+            - deploy:
+                name: release github
+                command: |
+                    if [[ "${CIRCLE_BRANCH}" =~ "^release-.*" ]]; then
+                        echo "hoge"
+                    fi
