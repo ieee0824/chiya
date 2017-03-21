@@ -8,6 +8,15 @@ jobs:
                   GO15VENDOREXPERIMENT: 1
         steps:
             - checkout
+            - run:
+                name: install glide
+                command: |
+                    go get github.com/Masterminds/glide
+                    go install github.com/Masterminds/glide
+            - run:
+                name: install packages
+                command:
+                    glide i
             - deploy:
                 name: release github
                 command: |
