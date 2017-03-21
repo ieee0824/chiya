@@ -14,3 +14,4 @@ jobs:
                     if [[ "${CIRCLE_BRANCH}" =~ "^release-.*" ]]; then
                         echo "hoge"
                     fi
+                    echo "end"
